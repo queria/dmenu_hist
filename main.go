@@ -49,50 +49,6 @@ func InExtra(what string) bool {
     return false
 }
 
-
-func ScanPath(dir_path string, passto chan<- map[string]bool) (app_names map[string]bool) {
-    app_names = make(map[string]bool)
-
-    directory, err := os.Open(dir_path)
-    _err(err)
-    files, err := directory.Readdir(0)
-    _err(err)
-
-    debug("p:", dir_path, len(files))
-
-    for _, file := range files {
-        if ! file.IsDir() && IsExec(file) {
-            app_names[file.Name()] = true
-        }
-    }
-
-    if passto != nil {
-        passto <- app_names
-        close(passto)
-    }
-    return app_names
-}
-
-func ScanPathsGoru() (app_names map[string]bool) {
-    app_names = make(map[string]bool)
-    var scanners []chan map[string]bool
-
-    paths := strings.Split(os.Getenv("PATH"), ":")
-    scanners = make([]chan map[string]bool, len(paths))
-    for idx, dir_path := range paths {
-        c := make(chan map[string]bool)
-        scanners[idx] = c
-        go ScanPath(dir_path, c)
-    }
-    for _, result := range scanners {
-        for app := range <-result {
-            app_names[app] = true
-        }
-    }
-    debug("scanners:", len(scanners))
-    return app_names
-}
-
 func ScanPathsFlat() (app_names map[string]bool) {
     app_names = make(map[string]bool)
 
