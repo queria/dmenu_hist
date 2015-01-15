@@ -17,6 +17,7 @@ var (
     history_path string = our_dir + "/history"
     arg_noop = kingpin.Flag("noop", "Do all except executing dmenu itself, for timing.").Bool()
     arg_edit = kingpin.Flag("edit", fmt.Sprintf("Open gvim with history file (%s)", history_path)).Bool()
+    arg_verbose = kingpin.Flag("verbose", "Be more verbose (show some debug info)").Bool()
     extra_cmd = map[string]func(){"!edit-history": LaunchEditor}
 )
 
@@ -28,7 +29,9 @@ func _err(e error) {
 }
 
 func debug(msgs ...interface{}) {
-    fmt.Println(msgs...)
+    if *arg_verbose {
+        fmt.Println(msgs...)
+    }
 }
 
 func IsExec(file os.FileInfo) bool {
