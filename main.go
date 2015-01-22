@@ -21,18 +21,21 @@ import (
     "os/exec"
     "strings"
     "sort"
+    "time"
 
     "gopkg.in/alecthomas/kingpin.v1"
     "github.com/kballard/go-shellquote"
 )
 
 var (
-    our_dir string = fmt.Sprintf("%s/.cache/dmenu_hist", os.Getenv("HOME"))
-    history_path string = our_dir + "/history"
+    g_our_dir string = fmt.Sprintf("%s/.cache/dmenu_hist", os.Getenv("HOME"))
+    g_history_path string = g_our_dir + "/history"
+    g_cache1_path string = fmt.Sprintf("/tmp/dmenu_hist-%s-cache", os.Getenv("USER"))
+    g_cache2_path string = g_our_dir + "/cache"
+    g_extra_cmd = map[string]func(){"!edit-history": LaunchEditor}
     arg_noop = kingpin.Flag("noop", "Do all except executing dmenu itself, for timing.").Bool()
-    arg_edit = kingpin.Flag("edit", fmt.Sprintf("Open gvim with history file (%s)", history_path)).Bool()
+    arg_edit = kingpin.Flag("edit", fmt.Sprintf("Open gvim with history file (%s)", g_history_path)).Bool()
     arg_verbose = kingpin.Flag("verbose", "Be more verbose (show some debug info)").Bool()
-    extra_cmd = map[string]func(){"!edit-history": LaunchEditor}
 )
 
 func _err(e error) {
@@ -44,7 +47,13 @@ func _err(e error) {
 
 func debug(msgs ...interface{}) {
     if *arg_verbose {
-        fmt.Println(msgs...)
+        fmt.Fprintf(os.Stderr, "[debug] %v\n", msgs)
+    }
+}
+
+func timeit(label string, started time.Time) {
+    if *arg_verbose {
+        fmt.Fprintln(os.Stderr, "[timeit]", time.Since(started), label)
     }
 }
 
@@ -53,22 +62,31 @@ func IsExec(file os.FileInfo) bool {
 }
 
 func In(what string, where []string) bool {
-    for _, s := range where {
-        if s == what { return true; }
+    return IndexOf(what, where) >= 0
+}
+
+func IndexOf(what string, where []string) int {
+    for idx, s := range where {
+        if s == what { return idx; }
     }
-    return false
+    return -1
 }
 
 func InExtra(what string) bool {
-    for key := range extra_cmd {
+    for key := range g_extra_cmd {
         if key == what { return true; }
     }
     return false
 }
 
-func ScanPathsFlat() (app_names map[string]bool) {
-    app_names = make(map[string]bool)
+func ScanPaths() (app_names []string) {
+    defer timeit("scanning path, converting and sorting app names", time.Now())
 
+    // collect app names in map to eliminate duplicates
+    app_hash := make(map[string]bool)
+
+    // go over all directories in path
+    // and find executable files in there
     paths := strings.Split(os.Getenv("PATH"), ":")
     for _, dir_path := range paths {
         directory, err := os.Open(dir_path)
@@ -80,30 +98,114 @@ func ScanPathsFlat() (app_names map[string]bool) {
 
         for _, file := range files {
             if ! file.IsDir() && IsExec(file) {
-                app_names[file.Name()] = true
+                app_hash[file.Name()] = true
             }
         }
     }
+
+    defer timeit("converting and sorting app names", time.Now())
+    // convert to list of names
+    app_names = make([]string, len(app_hash))
+    app_idx := 0
+    for app := range app_hash { app_names[app_idx] = app; app_idx++ }
+
+    defer timeit("sorting app names", time.Now())
+    // and sort the list
+    sort.Strings(app_names)
     return app_names
 }
 
-func LoadHistory(history_path string) []string {
-    debug("loading:", history_path)
-    file, err := os.OpenFile(history_path, os.O_CREATE | os.O_RDONLY, 0644)
+func PathLastChangedAt() time.Time {
+    var max_time time.Time
+    paths := strings.Split(os.Getenv("PATH"), ":")
+    for _, dir_path := range paths {
+        info, err := os.Stat(dir_path)
+        if err == nil && (info.ModTime().After(max_time)) {
+            max_time = info.ModTime()
+        }
+     }
+     return max_time
+}
+
+func ReadLines(file_path string) (lines []string) {
+    defer timeit("reading lines from: "+file_path, time.Now())
+    file, err := os.OpenFile(file_path, os.O_CREATE | os.O_RDONLY, 0644)
     _err(err)
     defer file.Close()
 
     data, err := ioutil.ReadAll(file)
     _err(err)
 
-    lines_rev := strings.Split(strings.TrimSpace(string(data)), "\n")
-    end := len(lines_rev) + len(extra_cmd)
+    lines = strings.Split(strings.TrimSpace(string(data)), "\n")
+    return lines
+}
+
+func WriteLines(file_path string, lines []string) (bytes_written int) {
+    file, err := os.OpenFile(file_path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+    _err(err)
+    defer file.Close()
+
+    bytes_written = 0
+    bytes_per_line := 0
+    for _, line := range lines {
+        bytes_per_line, err = file.WriteString(line+"\n")
+        _err(err)
+        bytes_written += bytes_per_line
+    }
+    debug("written out", bytes_written, "into", file_path)
+    return bytes_written
+}
+
+func LoadCache(path string, newer_than time.Time) (cached_apps []string) {
+    defer timeit("trying to load cache: "+path, time.Now())
+    info, err := os.Stat(path)
+    if err != nil || info.ModTime().Before(newer_than) {
+        return nil
+    }
+
+    return ReadLines(path)
+}
+
+func SaveCache(path string, app_names []string) {
+    defer timeit("saving of cache: "+path, time.Now())
+    WriteLines(path, app_names)
+}
+
+func LoadOrScanPaths() (app_names []string) {
+    invalid_cache := false
+    paths_changed_at := PathLastChangedAt()
+
+    app_names = LoadCache(g_cache1_path, paths_changed_at)
+    if app_names == nil {
+        invalid_cache = true
+        app_names = LoadCache(g_cache2_path, paths_changed_at)
+        if app_names == nil {
+            app_names = ScanPaths()
+        }
+    }
+    if invalid_cache {
+        SaveCache(g_cache1_path, app_names)
+        SaveCache(g_cache2_path, app_names)
+    }
+
+    return app_names
+}
+
+func LoadHistory(history_path string) []string {
+    defer timeit("loading history from: " + history_path, time.Now())
+
+    lines_rev := ReadLines(history_path)
+
+    end := len(lines_rev) + len(g_extra_cmd)
     lines := make([]string, end)
 
-    for cmd := range extra_cmd {
+    // add internal commands at the end of list
+    for cmd := range g_extra_cmd {
         end--
         lines[end] = cmd
     }
+    // add lines from history in reversed order
+    // (last [used] line to be first suggested)
     for _, line := range lines_rev {
         line = strings.TrimSpace(line)
         if line != "" && !In(line, lines) && !InExtra(line) {
@@ -116,57 +218,64 @@ func LoadHistory(history_path string) []string {
 }
 
 func SaveHistory(history_path string, history []string, last_used string) {
-    debug("adding:", last_used, "to:", history_path)
-    file, err := os.OpenFile(history_path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-    _err(err)
-    defer file.Close()
+    defer timeit("adding choice: "+last_used+" into history: "+history_path, time.Now())
 
-    totalbytes := 0
-    bytes := 0
-    for _, choice := range history {
-        if choice != last_used {
-            bytes, err = file.WriteString(choice+"\n")
-            totalbytes += bytes
+    idx := IndexOf(last_used, history)
+    if idx >= 0 {
+        history = append(history[:idx], history[idx+1:]...)
+        history = append(history, last_used)
+    }
+
+    WriteLines(history_path, history)
+}
+
+func FilterOutHistory(app_names []string, history []string) (filtered_names []string) {
+    defer timeit("filtering out history from app names", time.Now())
+    for _, used := range history {
+        debug("trying to filter out:", used, "in", len(app_names))
+        idx := sort.SearchStrings(app_names, used)
+        if app_names[idx] == used {
+            app_names = append(app_names[:idx], app_names[idx+1:]...)
         }
     }
-    bytes, err = file.WriteString(last_used+"\n")
-    _err(err)
-    debug("bytes written:", totalbytes+bytes)
+    return app_names
 }
 
 func LaunchEditor() {
     //editor := os.Getenv("EDITOR")
     //if editor == "" { editor = "/usr/bin/vi" }
-    //cmd := exec.Command("xterm", "-e", editor, history_path)
-    cmd := exec.Command("gvim", history_path)
+    //cmd := exec.Command("xterm", "-e", editor, g_history_path)
+    cmd := exec.Command("gvim", g_history_path)
     err := cmd.Start()
     _err(err)
     os.Exit(0)
 }
 
 func main() {
+    defer timeit("main", time.Now())
     kingpin.Parse()
 
     if *arg_edit { LaunchEditor() }
 
-    history := LoadHistory(history_path)
-    app_hash := ScanPathsFlat()
+    history := LoadHistory(g_history_path)
 
-    // remove those we have in history
-    for _, used := range history { delete(app_hash, used) }
-    // convert to list of names
-    app_names := make([]string, len(app_hash))
-    app_idx := 0
-    for app := range app_hash { app_names[app_idx] = app; app_idx++ }
-    // and sort the list
-    sort.Strings(app_names)
+    app_names := LoadOrScanPaths()
+
+
+    debug("before filter", len(app_names))
+    app_names = FilterOutHistory(app_names, history)
 
 
     debug("history:", strings.Join(history, " "))
     debug("apps count:", len(app_names))
 
+    if *arg_verbose {
+        for _, app := range (history) { os.Stdout.Write([]byte(app + "\n")) }
+        for _, app := range (app_names) { os.Stdout.Write([]byte(app + "\n")) }
+    }
+
     if *arg_noop {
-        os.Exit(0)
+        return
     }
 
     dmenu := exec.Command("dmenu")
@@ -188,7 +297,7 @@ func main() {
     choice := strings.TrimSpace(string(choice_bytes))
     if choice == "" { os.Exit(0) }
 
-    for cmd, action := range extra_cmd {
+    for cmd, action := range g_extra_cmd {
         if choice == cmd {
             action()
         }
@@ -203,7 +312,7 @@ func main() {
     found, err := exec.LookPath(prog)
     _err(err)
 
-    SaveHistory(history_path, history, choice)
+    SaveHistory(g_history_path, history, choice)
     cmd := exec.Command(found, args...)
     err = cmd.Start()
     _err(err)
