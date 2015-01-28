@@ -152,7 +152,7 @@ func WriteLines(file_path string, lines []string) (bytes_written int) {
         _err(err)
         bytes_written += bytes_per_line
     }
-    debug("written out", bytes_written, "into", file_path)
+    debug("written out", bytes_written, "bytes into", file_path)
     return bytes_written
 }
 
@@ -220,13 +220,18 @@ func LoadHistory(history_path string) []string {
 func SaveHistory(history_path string, history []string, last_used string) {
     defer timeit("adding choice: "+last_used+" into history: "+history_path, time.Now())
 
-    idx := IndexOf(last_used, history)
-    if idx >= 0 {
-        history = append(history[:idx], history[idx+1:]...)
-        history = append(history, last_used)
-    }
+    clean_history := make([]string, 0, len(history)+1)
 
-    WriteLines(history_path, history)
+    for _, cmd := range(history) {
+        if  cmd != last_used && !strings.HasPrefix(cmd, "!") {
+            clean_history = append(clean_history, cmd)
+        }
+    }
+    clean_history = append(clean_history, last_used)
+
+    debug("saving history:", clean_history)
+
+    WriteLines(history_path, clean_history)
 }
 
 func FilterOutHistory(app_names []string, history []string) (filtered_names []string) {
