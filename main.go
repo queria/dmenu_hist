@@ -256,9 +256,23 @@ func LaunchEditor() {
     os.Exit(0)
 }
 
+func stripExtraArgs(args []string) (normal []string, extra []string) {
+    delim := IndexOf("--", args)
+    if delim >= 0 {
+        normal = args[0:delim]
+        extra = args[delim+1:len(args)]
+    } else {
+        normal = args
+    }
+    return
+}
+
 func main() {
     defer timeit("main", time.Now())
-    kingpin.Parse()
+    args, dmenu_opts := stripExtraArgs(os.Args[1:])
+    kingpin.MustParse(kingpin.CommandLine.Parse(args))
+
+    debug("remaining opts:", dmenu_opts)
 
     if *arg_edit { LaunchEditor() }
 
@@ -283,7 +297,7 @@ func main() {
         return
     }
 
-    dmenu := exec.Command("dmenu")
+    dmenu := exec.Command("dmenu", dmenu_opts...)
     dmenu_in, err := dmenu.StdinPipe()
     _err(err)
     dmenu_out, err := dmenu.StdoutPipe()
@@ -312,13 +326,13 @@ func main() {
     _err(err)
 
     prog := choice_parts[0]
-    args := choice_parts[1:]
+    prog_args := choice_parts[1:]
 
     found, err := exec.LookPath(prog)
     _err(err)
 
     SaveHistory(g_history_path, history, choice)
-    cmd := exec.Command(found, args...)
+    cmd := exec.Command(found, prog_args...)
     err = cmd.Start()
     _err(err)
 }
