@@ -19,6 +19,7 @@ import (
     "io/ioutil"
     "os"
     "os/exec"
+    "strconv"
     "strings"
     "sort"
     "time"
@@ -191,55 +192,91 @@ func LoadOrScanPaths() (app_names []string) {
     return app_names
 }
 
-func LoadHistory(history_path string) []string {
-    defer timeit("loading history from: " + history_path, time.Now())
-
-    lines_rev := ReadLines(history_path)
-
-    end := len(lines_rev) + len(g_extra_cmd)
-    lines := make([]string, end)
-
-    // add internal commands at the end of list
-    for cmd := range g_extra_cmd {
-        end--
-        lines[end] = cmd
-    }
-    // add lines from history in reversed order
-    // (last [used] line to be first suggested)
-    for _, line := range lines_rev {
-        line = strings.TrimSpace(line)
-        if line != "" && !In(line, lines) && !InExtra(line) {
-            end--
-            lines[end] = line
-        }
-    }
-
-    return lines[end:]
+type UsedApp struct {
+    Cmd string
+    Count int
+}
+func (a UsedApp) String() string { return fmt.Sprintf("%v:%v", a.Cmd, a.Count) }
+type MostUsed []UsedApp
+func (apps MostUsed) Len() int { return len(apps) }
+func (apps MostUsed) Swap(i, j int) { apps[i], apps[j] = apps[j], apps[i] }
+func (apps MostUsed) Less(i, j int) bool {
+    // less (first) is the one with bigger usage count
+    return apps[i].Count > apps[j].Count
 }
 
-func SaveHistory(history_path string, history []string, last_used string) {
-    defer timeit("adding choice: "+last_used+" into history: "+history_path, time.Now())
-
-    clean_history := make([]string, 0, len(history)+1)
-
-    for _, cmd := range(history) {
-        if  cmd != last_used && !strings.HasPrefix(cmd, "!") {
-            clean_history = append(clean_history, cmd)
-        }
+func SplitHistoryLine(line string) (app UsedApp) {
+    delim := strings.Index(line, ":")
+    if delim == -1 {
+        // backward compat - just names without count
+        app.Cmd = line
+        app.Count = 1
+        return
     }
-    clean_history = append(clean_history, last_used)
+
+    app.Cmd = line[0:delim]
+    count, err := strconv.Atoi(
+        line[delim+1 : len(line)])
+    _err(err)
+    app.Count = count
+    return
+}
+
+func LoadHistory(history_path string) []UsedApp {
+    defer timeit("loading history from: " + history_path, time.Now())
+
+    lines_raw := ReadLines(history_path)
+
+    end := len(lines_raw) + len(g_extra_cmd)
+    history := make([]UsedApp, 0, end)
+
+    for _, line := range lines_raw {
+        line = strings.TrimSpace(line)
+        if line == "" { continue; }
+
+        app := SplitHistoryLine(line)
+        debug("read history line as:", line, app)
+        if app.Cmd == "" || InExtra(app.Cmd) { continue; }
+
+        history = append(history, app)
+    }
+    // internal commands always at the end of list
+    for cmd := range g_extra_cmd {
+        history = append(history, UsedApp{Cmd: cmd, Count: 0})
+    }
+
+    return history
+}
+
+func SaveHistory(history_path string, history []UsedApp, last_cmd string) {
+    defer timeit(
+        fmt.Sprintf("saving history: %v with: %v entries", history_path, len(history)),
+        time.Now())
+
+    clean_history := make([]string, 0, len(history) + 1)
+    for _, app := range(history) {
+        if strings.HasPrefix(app.Cmd, "!") { continue; } // exclude internal commands from history
+        if last_cmd != "" && last_cmd == app.Cmd {
+            app.Count += 1
+            last_cmd = ""
+        }
+        clean_history = append(clean_history, app.String())
+    }
+    if last_cmd != "" && !strings.HasPrefix(last_cmd, "!") {
+        clean_history = append(clean_history, UsedApp{Cmd: last_cmd, Count: 1}.String())
+    }
 
     debug("saving history:", clean_history)
 
     WriteLines(history_path, clean_history)
 }
 
-func FilterOutHistory(app_names []string, history []string) (filtered_names []string) {
+func FilterOutHistory(app_names []string, history []UsedApp) (filtered_names []string) {
     defer timeit("filtering out history from app names", time.Now())
     for _, used := range history {
         debug("trying to filter out:", used, "in", len(app_names))
-        idx := sort.SearchStrings(app_names, used)
-        if app_names[idx] == used {
+        idx := sort.SearchStrings(app_names, used.Cmd)
+        if app_names[idx] == used.Cmd {
             app_names = append(app_names[:idx], app_names[idx+1:]...)
         }
     }
@@ -277,6 +314,7 @@ func main() {
     if *arg_edit { LaunchEditor() }
 
     history := LoadHistory(g_history_path)
+    sort.Sort(MostUsed(history))
 
     app_names := LoadOrScanPaths()
 
@@ -285,13 +323,14 @@ func main() {
     app_names = FilterOutHistory(app_names, history)
 
 
-    debug("history:", strings.Join(history, " "))
+    debug("history:", history)
     debug("apps count:", len(app_names))
 
     if *arg_verbose {
-        for _, app := range (history) { os.Stdout.Write([]byte(app + "\n")) }
+        for _, app := range (history) { os.Stdout.Write([]byte(app.Cmd + "\n")) }
         for _, app := range (app_names) { os.Stdout.Write([]byte(app + "\n")) }
     }
+
 
     if *arg_noop {
         return
@@ -306,7 +345,7 @@ func main() {
     err = dmenu.Start()
     _err(err)
 
-    for _, app := range (history) { dmenu_in.Write([]byte(app + "\n")) }
+    for _, app := range (history) { dmenu_in.Write([]byte(app.Cmd + "\n")) }
     for _, app := range (app_names) { dmenu_in.Write([]byte(app + "\n")) }
     dmenu_in.Close()
 
