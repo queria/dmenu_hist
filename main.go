@@ -26,18 +26,22 @@ import (
 
     "gopkg.in/alecthomas/kingpin.v1"
     "github.com/kballard/go-shellquote"
+    "github.com/queria/golang-go-xdg"
 )
 
 var (
-    g_our_dir string = fmt.Sprintf("%s/.cache/dmenu_hist", os.Getenv("HOME"))
-    g_history_path string = g_our_dir + "/history"
-    g_cache1_path string = fmt.Sprintf("/tmp/dmenu_hist-%s-cache", os.Getenv("USER"))
-    g_cache2_path string = g_our_dir + "/cache"
+    g_history_path string
+    g_cache_path string
     g_extra_cmd = map[string]func(){"!edit-history": LaunchEditor}
     arg_noop = kingpin.Flag("noop", "Do all except executing dmenu itself, for timing.").Bool()
     arg_edit = kingpin.Flag("edit", fmt.Sprintf("Open gvim with history file (%s)", g_history_path)).Bool()
     arg_verbose = kingpin.Flag("verbose", "Be more verbose (show some debug info)").Bool()
 )
+
+func init() {
+    g_history_path, _ = xdg.Data.Ensure("dmenu_hist/history")
+    g_cache_path, _= xdg.Cache.Ensure("dmenu_hist/app_cache")
+}
 
 func _err(e error) {
     if e != nil {
@@ -137,7 +141,12 @@ func ReadLines(file_path string) (lines []string) {
     data, err := ioutil.ReadAll(file)
     _err(err)
 
-    lines = strings.Split(strings.TrimSpace(string(data)), "\n")
+    lines_raw := strings.Split(strings.TrimSpace(string(data)), "\n")
+    for _, line := range lines_raw {
+        line = strings.TrimSpace(line)
+        if line == "" { continue; }
+        lines = append(lines, line)
+    }
     return lines
 }
 
@@ -173,20 +182,12 @@ func SaveCache(path string, app_names []string) {
 }
 
 func LoadOrScanPaths() (app_names []string) {
-    invalid_cache := false
     paths_changed_at := PathLastChangedAt()
+    app_names = LoadCache(g_cache_path, paths_changed_at)
 
-    app_names = LoadCache(g_cache1_path, paths_changed_at)
-    if app_names == nil {
-        invalid_cache = true
-        app_names = LoadCache(g_cache2_path, paths_changed_at)
-        if app_names == nil {
-            app_names = ScanPaths()
-        }
-    }
-    if invalid_cache {
-        SaveCache(g_cache1_path, app_names)
-        SaveCache(g_cache2_path, app_names)
+    if app_names == nil || len(app_names) == 0 {
+        app_names = ScanPaths()
+        SaveCache(g_cache_path, app_names)
     }
 
     return app_names
@@ -231,9 +232,6 @@ func LoadHistory(history_path string) []UsedApp {
     history := make([]UsedApp, 0, end)
 
     for _, line := range lines_raw {
-        line = strings.TrimSpace(line)
-        if line == "" { continue; }
-
         app := SplitHistoryLine(line)
         debug("read history line as:", line, app)
         if app.Cmd == "" || InExtra(app.Cmd) { continue; }
